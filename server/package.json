@@ -1,0 +1,20 @@
+{
+  "name": "spottr-server",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Spottr backend on Vercel — mints OpenAI Realtime ephemeral keys",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel deploy --prod",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.2.10",
+    "@types/node": "^20.12.12",
+    "typescript": "^5.4.5",
+    "vercel": "^53.0.0"
+  }
+}
