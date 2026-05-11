@@ -1,0 +1,469 @@
+import AVFoundation
+import Combine
+import CoreVideo
+import SwiftUI
+
+/// Stage of the workout session.
+///
+/// `.waiting` — camera is on, realtime is connecting in the background, but
+///   the system has not yet seen the athlete clearly. Nothing fires.
+/// `.ready`   — pose has been detected continuously for a beat. The coach
+///   greets ("I see you, start when ready") so the athlete knows even with
+///   the phone across the room. Timer still hasn't started.
+/// `.active`  — first rep was detected; timer + counting are now live.
+/// `.finished` — set ended (target reached or user pressed End set).
+enum WorkoutStage {
+    case waiting, ready, active, finished
+}
+
+@MainActor
+final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate {
+
+    @Published var snapshot = AnalyzerSnapshot()
+    @Published var elapsedMs: Int = 0
+    @Published var coachError: String? = nil
+    @Published var stage: WorkoutStage = .waiting
+    /// Set when the user (or auto-finish) ends the set; the view navigates.
+    @Published var didFinish: Bool = false
+
+    let camera = CameraSession()
+    let realtime: RealtimeClient
+
+    private let exercise: ExerciseId
+    private let targetReps: Int
+    private let analyzer: ExerciseAnalyzer
+    private let detector = PoseDetector()
+    private let detectionQueue = DispatchQueue(label: "com.spottr.pose", qos: .userInteractive)
+
+    private var startedAt: TimeInterval = CACurrentMediaTime()
+    private var collectedReps: [RepCompleted] = []
+    private var timerCancellable: AnyCancellable?
+    private var realtimeStateObservation: AnyCancellable?
+    private var realtimeErrorObservation: AnyCancellable?
+    private var finishTask: Task<Void, Never>? = nil
+
+    /// Continuous frames in which we've seen a confident full-body pose.
+    private var stableFrameCount: Int = 0
+    /// Number of frames required before transitioning waiting → ready.
+    private let framesForReady: Int = 18  // ~1.5s at ~12fps Vision throughput
+
+    init(exercise: ExerciseId, targetReps: Int, athleteName: String?) {
+        self.exercise = exercise
+        self.targetReps = targetReps
+        self.analyzer = AnalyzerFactory.make(for: exercise)
+        self.realtime = RealtimeClient(exercise: exercise,
+                                       targetReps: targetReps,
+                                       athleteName: athleteName)
+        super.init()
+        camera.delegate = self
+    }
+
+    func start() {
+        camera.start()
+
+        Task { await realtime.connect() }
+
+        // Timer ticks all the time but only displays elapsed once active.
+        timerCancellable = Timer.publish(every: 0.25, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.stage == .active {
+                    self.elapsedMs = Int((CACurrentMediaTime() - self.startedAt) * 1000)
+                }
+            }
+
+        realtimeErrorObservation = realtime.$lastError
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.coachError = $0 }
+    }
+
+    func tearDown() {
+        finishTask?.cancel()
+        timerCancellable?.cancel()
+        realtimeStateObservation?.cancel()
+        realtimeErrorObservation?.cancel()
+        camera.stop()
+        realtime.close()
+    }
+
+    // MARK: - User actions
+
+    func endSet() {
+        guard !didFinish else { return }
+        didFinish = true
+        stage = .finished
+        emitSummary()
+    }
+
+    /// Called by the view when the analyzer detects rep ≥ target.
+    private func handleTargetReached() {
+        guard !didFinish else { return }
+        didFinish = true
+        stage = .finished
+        realtime.requestSpeech(reason: "set_target_reached")
+        // Allow ~3.5s for the milestone cue to play before tearing down.
+        finishTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            self?.emitSummary()
+        }
+    }
+
+    private func emitSummary() {
+        let durationMs = stage == .active ? Int((CACurrentMediaTime() - startedAt) * 1000) : 0
+        let stats = analyzer.setStats()
+        realtime.sendEvent(.setFinished(
+            exercise: exercise,
+            reps: stats.reps,
+            avgScore: stats.avgScore,
+            durationMs: durationMs,
+            topIssues: stats.topIssues
+        ), requestSpeech: true)
+        // didFinish is already true; the view observes it and navigates.
+    }
+
+    // MARK: - Pose pipeline
+
+    nonisolated func cameraSession(_ session: CameraSession,
+                                   didCapture pixelBuffer: CVPixelBuffer,
+                                   at time: TimeInterval) {
+        // Detection runs on the camera queue (background). Hop to main only
+        // for state mutation, so we don't block frame delivery.
+        let detector = self.detector
+        let pose = detector.detect(in: pixelBuffer, timestamp: time)
+
+        Task { @MainActor [weak self] in
+            self?.ingest(pose: pose)
+        }
+    }
+
+    /// Called on the main actor for every camera frame, with `pose == nil` when
+    /// no body is detected. The stage machine + analyzer live here.
+    private func ingest(pose: Pose?) {
+        // Stage machine: drive the waiting → ready transition off pose stability.
+        if pose != nil {
+            stableFrameCount += 1
+        } else {
+            stableFrameCount = max(0, stableFrameCount - 2) // decay faster on misses
+        }
+
+        if stage == .waiting, stableFrameCount >= framesForReady {
+            stage = .ready
+            // Tell the coach to greet so the athlete (with headphones on) hears it.
+            realtime.sendEvent(.setReady(exercise: exercise, targetReps: targetReps),
+                               requestSpeech: true)
+        }
+
+        guard let pose = pose else { return }
+
+        let events = analyzer.update(pose)
+        snapshot = analyzer.snapshot()
+
+        for ev in events {
+            switch ev {
+            case .repCompleted(let rep):
+                // First rep transitions ready → active and starts the timer.
+                if stage != .active {
+                    stage = .active
+                    startedAt = CACurrentMediaTime() - Double(rep.durationMs) / 1000
+                    realtime.sendEvent(.setStarted(exercise: exercise, targetReps: targetReps),
+                                       requestSpeech: false)
+                }
+                collectedReps.append(rep)
+                let milestone = rep.index % 5 == 0 || rep.index == targetReps
+                let hasIssue = !rep.issues.isEmpty
+                realtime.sendEvent(.repCompleted(rep), requestSpeech: milestone || hasIssue)
+                if rep.index >= targetReps {
+                    handleTargetReached()
+                }
+            case .formIssue(let issue, let exercise):
+                // Only react to form issues once a set is actually live.
+                guard stage == .active else { continue }
+                realtime.sendEvent(.formIssue(exercise: exercise,
+                                              issue: issue.id,
+                                              severity: issue.severity),
+                                   requestSpeech: issue.severity != .minor)
+            case .phaseChanged:
+                break
+            }
+        }
+    }
+
+    // MARK: - Demo helpers (for when the camera can't see the user)
+
+    func manualRep() {
+        let index = snapshot.reps + 1
+        let rep = RepCompleted(exercise: exercise, index: index,
+                               durationMs: 1500, score: 0.9, issues: [])
+        if stage != .active {
+            stage = .active
+            startedAt = CACurrentMediaTime() - Double(rep.durationMs) / 1000
+            realtime.sendEvent(.setStarted(exercise: exercise, targetReps: targetReps),
+                               requestSpeech: false)
+        }
+        collectedReps.append(rep)
+        snapshot.reps = index
+        snapshot.lastScore = rep.score
+        let milestone = index % 5 == 0 || index == targetReps
+        realtime.sendEvent(.repCompleted(rep), requestSpeech: milestone)
+        if index >= targetReps { handleTargetReached() }
+    }
+
+    func manualIssue() {
+        let issue: FormIssueId
+        switch exercise {
+        case .squat:  issue = .squatShallowDepth
+        case .pushup: issue = .pushupPartialRom
+        case .pullup: issue = .pullupChinShort
+        }
+        realtime.sendEvent(.formIssue(exercise: exercise, issue: issue, severity: .moderate),
+                           requestSpeech: true)
+    }
+
+    var collectedRepsSnapshot: [RepCompleted] { collectedReps }
+}
+
+struct WorkoutView: View {
+    @EnvironmentObject var session: SessionState
+
+    var body: some View {
+        WorkoutSession(exercise: session.exercise,
+                       targetReps: session.targetReps,
+                       athleteName: session.athleteName)
+    }
+}
+
+private struct WorkoutSession: View {
+    @EnvironmentObject var session: SessionState
+    @StateObject private var controller: WorkoutController
+    @State private var permissionDenied = false
+
+    init(exercise: ExerciseId, targetReps: Int, athleteName: String) {
+        _controller = StateObject(wrappedValue: WorkoutController(
+            exercise: exercise, targetReps: targetReps, athleteName: athleteName))
+    }
+
+    var body: some View {
+        ZStack {
+            CameraPreviewView(session: controller.camera.session)
+                .ignoresSafeArea()
+                .background(Color.black)
+
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                hud
+                if let err = controller.coachError {
+                    errorBanner(err)
+                }
+                if !controller.snapshot.activeIssues.isEmpty {
+                    issueBanner
+                }
+                Spacer()
+                if controller.stage != .active && controller.stage != .finished {
+                    stageOverlay
+                }
+                bottomBar
+            }
+            .padding(Spacing.md)
+        }
+        .background(Color.black.ignoresSafeArea())
+        .navigationBarHidden(true)
+        .task {
+            // Configure camera + permissions once when the view appears.
+            let granted = await CameraSession.requestPermission()
+            if !granted {
+                permissionDenied = true
+                return
+            }
+            // Reconfigure controller now that we know the exercise/target.
+            // (StateObject already exists; we just kick start with current values.)
+            controller.start()
+        }
+        .onDisappear { controller.tearDown() }
+        .onChange(of: controller.didFinish) { finished in
+            if finished {
+                let durationMs = Int(controller.elapsedMs)
+                let summary = SetSummary.build(
+                    exercise: session.exercise,
+                    reps: controller.collectedRepsSnapshot,
+                    durationMs: durationMs)
+                session.summary = summary
+                session.goSummary()
+            }
+        }
+        .alert("Camera access needed",
+               isPresented: $permissionDenied,
+               actions: {
+                Button("OK") { session.popToHome() }
+               },
+               message: { Text("Spottr can't analyze your form without the camera. You can grant access in Settings.") })
+    }
+
+    // MARK: - Actions
+
+    /// End-set handler that always navigates, even if the realtime client is
+    /// in an error state. Builds the summary inline from whatever reps the
+    /// controller has collected, then pushes the Summary screen.
+    private func finishNow() {
+        controller.endSet() // best-effort: notifies the coach + sets stage
+        let summary = SetSummary.build(
+            exercise: session.exercise,
+            reps: controller.collectedRepsSnapshot,
+            durationMs: controller.elapsedMs)
+        session.summary = summary
+        session.goSummary()
+    }
+
+    // MARK: - Subviews
+
+    private var stageOverlay: some View {
+        let isReady = controller.stage == .ready
+        let title = isReady ? "Ready when you are" : "Looking for you…"
+        let subtitle = isReady
+            ? "Start your first \(session.exercise.displayName.lowercased()) — Spottr will count from there."
+            : "Step fully into the frame so the camera can see your whole body."
+        let icon = isReady ? "figure.strengthtraining.traditional" : "figure.stand"
+
+        return VStack(spacing: Spacing.sm) {
+            Image(systemName: icon)
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundColor(isReady ? Theme.accent : Theme.textDim)
+            Text(title)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(Theme.text)
+            Text(subtitle)
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textDim)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(Spacing.md + 4)
+        .background(Color.black.opacity(0.78))
+        .cornerRadius(Radius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.md)
+                .strokeBorder(isReady ? Theme.accent : Theme.border, lineWidth: 1)
+        )
+    }
+
+    private var hud: some View {
+        VStack(spacing: Spacing.sm) {
+            HStack(spacing: Spacing.sm) {
+                stat("REPS", "\(controller.snapshot.reps)/\(session.targetReps)", accent: true)
+                stat("TIME", formatTime(ms: controller.elapsedMs))
+                stat("SCORE", controller.snapshot.lastScore.map { "\(Int($0 * 100))" } ?? "—")
+            }
+            cueBox
+        }
+    }
+
+    private var cueBox: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(connectionLabel(controller.realtime.state).uppercased())
+                .font(.system(size: 11, weight: .medium))
+                .tracking(1)
+                .foregroundColor(Theme.accent)
+            Text(controller.realtime.currentCue.isEmpty
+                 ? (controller.realtime.state == .connected ? "Listening…" : "—")
+                 : controller.realtime.currentCue)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(Theme.text)
+                .lineLimit(2)
+                .frame(minHeight: 22)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Spacing.md)
+        .background(Color.black.opacity(0.78))
+        .cornerRadius(Radius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.md)
+                .strokeBorder(Theme.border, lineWidth: 1)
+        )
+    }
+
+    private func stat(_ label: String, _ value: String, accent: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.system(size: 11, weight: .medium)).tracking(1).foregroundColor(Theme.textDim)
+            Text(value).font(.system(size: 22, weight: .bold)).foregroundColor(accent ? Theme.accent : Theme.text)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Spacing.sm + 2)
+        .background(Color.black.opacity(0.7))
+        .cornerRadius(Radius.md)
+    }
+
+    private func errorBanner(_ msg: String) -> some View {
+        Text("Coach error: \(msg)")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .padding(Spacing.sm + 2)
+            .background(Theme.bad.opacity(0.9))
+            .cornerRadius(Radius.md)
+    }
+
+    private var issueBanner: some View {
+        VStack(spacing: 4) {
+            ForEach(controller.snapshot.activeIssues.prefix(2), id: \.self) { id in
+                Text(id.label)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(Spacing.sm + 2)
+        .background(Theme.bad.opacity(0.85))
+        .cornerRadius(Radius.md)
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: Spacing.sm) {
+            HStack(spacing: Spacing.md) {
+                Button(action: { controller.manualRep() }) {
+                    Text("+ Rep")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
+                        .padding(.horizontal, Spacing.lg)
+                        .padding(.vertical, Spacing.sm + 4)
+                        .background(Theme.accent)
+                        .clipShape(Capsule())
+                }
+                Button(action: { controller.manualIssue() }) {
+                    Text("Issue")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(Color(red: 0.122, green: 0.075, blue: 0.0))
+                        .padding(.horizontal, Spacing.lg)
+                        .padding(.vertical, Spacing.sm + 4)
+                        .background(Theme.warn)
+                        .clipShape(Capsule())
+                }
+            }
+            Button(action: finishNow) {
+                Text("End set")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, Spacing.xl)
+                    .padding(.vertical, Spacing.md)
+                    .background(Theme.bad)
+                    .clipShape(Capsule())
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func formatTime(ms: Int) -> String {
+        let s = ms / 1000
+        return String(format: "%02d:%02d", s / 60, s % 60)
+    }
+
+    private func connectionLabel(_ s: RealtimeState) -> String {
+        switch s {
+        case .idle: return "Idle"
+        case .fetchingSession: return "Connecting to coach…"
+        case .connecting: return "Connecting…"
+        case .connected: return "Coach"
+        case .speaking: return "Coach speaking"
+        case .error: return "Coach offline"
+        case .closed: return "Coach disconnected"
+        }
+    }
+}

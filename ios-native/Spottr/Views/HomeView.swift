@@ -1,0 +1,85 @@
+import SwiftUI
+
+struct HomeView: View {
+    @EnvironmentObject var session: SessionState
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Spacing.lg) {
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("Spottr")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundColor(Theme.text)
+                    Text("AI gym coach. Real-time form feedback.")
+                        .font(.system(size: 17))
+                        .foregroundColor(Theme.textDim)
+                }
+                .padding(.top, Spacing.xl)
+
+                nameField
+
+                Button(action: { session.goExerciseSelect() }) {
+                    Text("Start a set")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, Spacing.md + 4)
+                        .background(Theme.accent)
+                        .cornerRadius(Radius.lg)
+                }
+                .padding(.vertical, Spacing.sm)
+
+                disclaimerCard
+            }
+            .padding(Spacing.lg)
+        }
+        .background(Theme.bg.ignoresSafeArea())
+        .navigationBarHidden(true)
+    }
+
+    private var nameField: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text("YOUR NAME")
+                .font(.system(size: 12, weight: .medium))
+                .tracking(1)
+                .foregroundColor(Theme.textDim)
+            TextField("Your name", text: $session.athleteName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled(true)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(Theme.text)
+                .padding(Spacing.md)
+                .background(Theme.card)
+                .cornerRadius(Radius.md)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.md)
+                        .strokeBorder(Theme.border, lineWidth: 1)
+                )
+        }
+        .padding(.top, Spacing.md)
+    }
+
+    private var disclaimerCard: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            Text("BEFORE YOU START")
+                .font(.system(size: 12, weight: .bold))
+                .tracking(1)
+                .foregroundColor(Theme.warn)
+            Group {
+                Text("Spottr is a prototype, not medical or professional coaching advice. Form analysis is heuristic and may be wrong.")
+                Text("Stop immediately if you feel pain, dizziness, or instability. Consult a qualified coach or physician before starting a new program.")
+                Text("Video frames are processed on-device and never recorded by default.")
+            }
+            .font(.system(size: 14))
+            .foregroundColor(Theme.textDim)
+            .lineSpacing(4)
+        }
+        .padding(Spacing.md)
+        .background(Theme.card)
+        .cornerRadius(Radius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.md)
+                .strokeBorder(Theme.border, lineWidth: 1)
+        )
+    }
+}

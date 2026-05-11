@@ -1,0 +1,57 @@
+name: Spottr
+options:
+  bundleIdPrefix: com.oshidipe
+  deploymentTarget:
+    iOS: "16.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: "65CJUWLRC9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    from: "125.0.0"
+
+targets:
+  Spottr:
+    type: application
+    platform: iOS
+    sources:
+      - path: Spottr
+    info:
+      path: Spottr/Info.plist
+      properties:
+        UILaunchStoryboardName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIUserInterfaceStyle: Dark
+        NSCameraUsageDescription: "Spottr uses the camera to analyze your exercise form on-device. Frames are not recorded."
+        NSMicrophoneUsageDescription: "Spottr uses the microphone so you can talk to your AI coach."
+        NSLocalNetworkUsageDescription: "Spottr connects to the coaching backend running on your local network."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
+        ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes:
+          - audio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.oshidipe.spottr
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Spottr/Spottr.entitlements
+        ENABLE_BITCODE: NO
+    dependencies:
+      - package: WebRTC
