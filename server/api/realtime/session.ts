@@ -62,12 +62,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           output_modalities: ['audio'],
           audio: {
             input: {
-              // Semantic VAD detects when the athlete has finished a sentence
-              // and auto-creates a response. `eagerness: low` ignores grunts
-              // and breathing — it waits for clear, deliberate speech.
+              // Semantic VAD: detects when the athlete has finished a sentence
+              // and auto-creates a response. `eagerness: auto` is responsive
+              // enough for across-the-room AirPods mic; `low` was too
+              // conservative and missed real user questions mid-workout.
               turn_detection: {
                 type: 'semantic_vad',
-                eagerness: 'low',
+                eagerness: 'auto',
                 create_response: true,
                 interrupt_response: true,
               },
