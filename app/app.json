@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "Spottr",
+    "slug": "spottr",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.oshidipe.spottr.dev",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Spottr uses the camera to analyze your exercise form on-device. Frames are not recorded.",
+        "NSMicrophoneUsageDescription": "Spottr uses the microphone so you can talk to your AI coach.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.pithoslabs.spottr",
+      "permissions": ["CAMERA", "RECORD_AUDIO", "MODIFY_AUDIO_SETTINGS"]
+    },
+    "plugins": [
+      "expo-camera",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "15.1"
+          },
+          "android": {
+            "minSdkVersion": 24,
+            "compileSdkVersion": 34,
+            "targetSdkVersion": 34
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "tsconfigPaths": true
+    }
+  }
+}
