@@ -196,7 +196,12 @@ final class RealtimeClient: NSObject, ObservableObject {
     }
 
     private func postSDP(_ sdp: String, clientSecret: String, model: String) async throws -> String {
-        var req = URLRequest(url: URL(string: "https://api.openai.com/v1/realtime?model=\(model)")!)
+        // GA endpoint. The legacy /v1/realtime auto-asserts an `OpenAI-Beta:
+        // realtime=v1` header server-side and now returns
+        // "Unknown beta requested: 'realtime'". The GA path is /v1/realtime/calls
+        // and uses the model embedded in the ephemeral key — passing model in
+        // the query string is also accepted.
+        var req = URLRequest(url: URL(string: "https://api.openai.com/v1/realtime/calls?model=\(model)")!)
         req.httpMethod = "POST"
         req.setValue("Bearer \(clientSecret)", forHTTPHeaderField: "Authorization")
         req.setValue("application/sdp", forHTTPHeaderField: "Content-Type")
