@@ -3,9 +3,14 @@ import Foundation
 /// Events the client pushes through the Realtime data channel as `conversation.item.create`
 /// messages with role=user, prefixed with "[event]".
 enum CoachEvent: Encodable {
-    /// Camera has locked onto the athlete; the coach should greet briefly.
-    case setReady(exercise: ExerciseId, targetReps: Int?)
+    /// The athlete is now fully in frame and ready; the coach should greet.
+    case setReady(exercise: ExerciseId, targetReps: Int?, framing: String, fullBodyVisible: Bool)
     case setStarted(exercise: ExerciseId, targetReps: Int?)
+    /// Latest camera-derived pose context. This is sent silently so the coach
+    /// can answer user questions from current visual data.
+    case cameraObservation(CameraObservation)
+    /// Latest real vision-model description from a camera snapshot.
+    case visualObservation(VisualObservation)
     case repCompleted(RepCompleted)
     case formIssue(exercise: ExerciseId, issue: FormIssueId, severity: IssueSeverity)
     case setFinished(exercise: ExerciseId, reps: Int, avgScore: Double, durationMs: Int, topIssues: [FormIssueId])
@@ -15,14 +20,22 @@ enum CoachEvent: Encodable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(Date().timeIntervalSince1970 * 1000, forKey: .timestamp)
         switch self {
-        case .setReady(let exercise, let target):
+        case .setReady(let exercise, let target, let framing, let fullBodyVisible):
             try c.encode("set_ready", forKey: .type)
             try c.encode(exercise, forKey: .exercise)
             try c.encodeIfPresent(target, forKey: .targetReps)
+            try c.encode(framing, forKey: .framing)
+            try c.encode(fullBodyVisible, forKey: .fullBodyVisible)
         case .setStarted(let exercise, let target):
             try c.encode("set_started", forKey: .type)
             try c.encode(exercise, forKey: .exercise)
             try c.encodeIfPresent(target, forKey: .targetReps)
+        case .cameraObservation(let observation):
+            try c.encode("camera_observation", forKey: .type)
+            try c.encode(observation, forKey: .observation)
+        case .visualObservation(let observation):
+            try c.encode("visual_observation", forKey: .type)
+            try c.encode(observation, forKey: .observation)
         case .repCompleted(let rep):
             try c.encode("rep_completed", forKey: .type)
             try c.encode(rep, forKey: .rep)
@@ -45,9 +58,52 @@ enum CoachEvent: Encodable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case type, timestamp, exercise, targetReps, rep, issue, severity
+        case type, timestamp, exercise, targetReps, observation, rep, issue, severity
         case reps, avgScore, durationMs, topIssues, reason
+        case framing, fullBodyVisible
     }
+}
+
+struct CameraObservation: Encodable {
+    let exercise: ExerciseId
+    let workoutStage: String
+    let targetReps: Int
+    let reps: Int
+    let phase: RepPhase
+    let activeIssues: [FormIssueId]
+    let poseVisible: Bool
+    let fullBodyVisible: Bool
+    let framing: String
+    let bodyBox: BodyBox?
+    let avgConfidence: Double?
+    let visibleKeypoints: [String]
+    let keypoints: [PoseLandmark]
+}
+
+struct BodyBox: Encodable {
+    let minX: Double
+    let minY: Double
+    let maxX: Double
+    let maxY: Double
+}
+
+struct PoseLandmark: Encodable {
+    let name: String
+    let x: Double
+    let y: Double
+    let confidence: Double
+}
+
+struct VisualObservation: Encodable {
+    let exercise: ExerciseId
+    let workoutStage: String
+    let reps: Int
+    let description: String
+    let facts: VisionFacts?
+    let model: String
+    let capturedAt: Int
+    let analyzedAt: Int?
+    let receivedAt: Int
 }
 
 /// Build the JSON payload for `conversation.item.create` wrapping a coach event.

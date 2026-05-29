@@ -7,8 +7,8 @@ import SwiftUI
 ///
 /// `.waiting` — camera is on, realtime is connecting in the background, but
 ///   the system has not yet seen the athlete clearly. Nothing fires.
-/// `.ready`   — pose has been detected continuously for a beat. The coach
-///   greets ("I see you, start when ready") so the athlete knows even with
+/// `.ready`   — the athlete's whole body has been in frame continuously for a
+///   beat. The coach greets them by name so they know they're set, even with
 ///   the phone across the room. Timer still hasn't started.
 /// `.active`  — first rep was detected; timer + counting are now live.
 /// `.finished` — set ended (target reached or user pressed End set).
@@ -25,6 +25,8 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     @Published var stage: WorkoutStage = .waiting
     /// Set when the user (or auto-finish) ends the set; the view navigates.
     @Published var didFinish: Bool = false
+    /// True when the back camera is the active feed (default is the front).
+    @Published private(set) var usingBackCamera: Bool = false
 
     let camera = CameraSession()
     let realtime: RealtimeClient
@@ -33,6 +35,7 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     private let targetReps: Int
     private let analyzer: ExerciseAnalyzer
     private let detector = PoseDetector()
+    private let visualFrameSampler = VisualFrameSampler(interval: 3.0)
     private let detectionQueue = DispatchQueue(label: "com.spottr.pose", qos: .userInteractive)
 
     private var startedAt: TimeInterval = CACurrentMediaTime()
@@ -46,6 +49,9 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     private var stableFrameCount: Int = 0
     /// Number of frames required before transitioning waiting → ready.
     private let framesForReady: Int = 18  // ~1.5s at ~12fps Vision throughput
+    private var lastCameraObservationSentAt: TimeInterval = 0
+    private let cameraObservationInterval: TimeInterval = 1.0
+    private var latestVisualCaptureSentAt: Int = 0
 
     init(exercise: ExerciseId, targetReps: Int, athleteName: String?) {
         self.exercise = exercise
@@ -96,6 +102,13 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
         emitSummary()
     }
 
+    /// Flip between the front (selfie) and back camera mid-session. The pose
+    /// pipeline and coach connection are unaffected — only the feed changes.
+    func flipCamera() {
+        usingBackCamera.toggle()
+        camera.setPosition(usingBackCamera ? .back : .front)
+    }
+
     /// Called by the view when the analyzer detects rep ≥ target.
     private func handleTargetReached() {
         guard !didFinish else { return }
@@ -131,6 +144,12 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
         // for state mutation, so we don't block frame delivery.
         let detector = self.detector
         let pose = detector.detect(in: pixelBuffer, timestamp: time)
+        let visualFrameSampler = self.visualFrameSampler
+        visualFrameSampler.captureIfDue(pixelBuffer: pixelBuffer, at: time) { jpegData, capturedAt in
+            Task { @MainActor [weak self] in
+                self?.describeVisualFrame(jpegData, capturedAt: capturedAt)
+            }
+        }
 
         Task { @MainActor [weak self] in
             self?.ingest(pose: pose)
@@ -140,8 +159,11 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     /// Called on the main actor for every camera frame, with `pose == nil` when
     /// no body is detected. The stage machine + analyzer live here.
     private func ingest(pose: Pose?) {
-        // Stage machine: drive the waiting → ready transition off pose stability.
-        if pose != nil {
+        // Stage machine: hold off the waiting → ready transition until the
+        // *whole body* has been stably in frame, so the coach's greeting can
+        // honestly say it sees the athlete fully framed.
+        let fullBodyVisible = pose.map(isFullBodyVisible) ?? false
+        if fullBodyVisible {
             stableFrameCount += 1
         } else {
             stableFrameCount = max(0, stableFrameCount - 2) // decay faster on misses
@@ -150,14 +172,21 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
         if stage == .waiting, stableFrameCount >= framesForReady {
             stage = .ready
             // Tell the coach to greet so the athlete (with headphones on) hears it.
-            realtime.sendEvent(.setReady(exercise: exercise, targetReps: targetReps),
+            realtime.sendEvent(.setReady(exercise: exercise,
+                                         targetReps: targetReps,
+                                         framing: pose.map { framingLabel(for: $0) } ?? "well_framed",
+                                         fullBodyVisible: true),
                                requestSpeech: true)
         }
 
-        guard let pose = pose else { return }
+        guard let pose = pose else {
+            maybeSendCameraObservation(pose: nil)
+            return
+        }
 
         let events = analyzer.update(pose)
         snapshot = analyzer.snapshot()
+        maybeSendCameraObservation(pose: pose)
 
         for ev in events {
             switch ev {
@@ -170,9 +199,8 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
                                        requestSpeech: false)
                 }
                 collectedReps.append(rep)
-                let milestone = rep.index % 5 == 0 || rep.index == targetReps
-                let hasIssue = !rep.issues.isEmpty
-                realtime.sendEvent(.repCompleted(rep), requestSpeech: milestone || hasIssue)
+                let shouldSpeak = rep.index == targetReps || rep.issues.contains { $0.severity == .severe }
+                realtime.sendEvent(.repCompleted(rep), requestSpeech: shouldSpeak)
                 if rep.index >= targetReps {
                     handleTargetReached()
                 }
@@ -182,7 +210,7 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
                 realtime.sendEvent(.formIssue(exercise: exercise,
                                               issue: issue.id,
                                               severity: issue.severity),
-                                   requestSpeech: issue.severity != .minor)
+                                   requestSpeech: issue.severity == .severe)
             case .phaseChanged:
                 break
             }
@@ -204,8 +232,7 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
         collectedReps.append(rep)
         snapshot.reps = index
         snapshot.lastScore = rep.score
-        let milestone = index % 5 == 0 || index == targetReps
-        realtime.sendEvent(.repCompleted(rep), requestSpeech: milestone)
+        realtime.sendEvent(.repCompleted(rep), requestSpeech: index == targetReps)
         if index >= targetReps { handleTargetReached() }
     }
 
@@ -221,6 +248,147 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     }
 
     var collectedRepsSnapshot: [RepCompleted] { collectedReps }
+
+    private func maybeSendCameraObservation(pose: Pose?) {
+        let now = CACurrentMediaTime()
+        guard now - lastCameraObservationSentAt >= cameraObservationInterval else { return }
+        lastCameraObservationSentAt = now
+
+        let observation = buildCameraObservation(pose: pose)
+        realtime.sendEvent(.cameraObservation(observation),
+                           requestSpeech: false,
+                           queueIfDisconnected: false)
+    }
+
+    private func buildCameraObservation(pose: Pose?) -> CameraObservation {
+        guard let pose else {
+            return CameraObservation(
+                exercise: exercise,
+                workoutStage: String(describing: stage),
+                targetReps: targetReps,
+                reps: snapshot.reps,
+                phase: snapshot.phase,
+                activeIssues: snapshot.activeIssues,
+                poseVisible: false,
+                fullBodyVisible: false,
+                framing: "no_body_pose_detected",
+                bodyBox: nil,
+                avgConfidence: nil,
+                visibleKeypoints: [],
+                keypoints: []
+            )
+        }
+
+        let landmarks = poseLandmarks(from: pose)
+        let box = bodyBox(from: landmarks)
+        let avgConfidence = landmarks.isEmpty
+            ? nil
+            : rounded(landmarks.map(\.confidence).reduce(0, +) / Double(landmarks.count))
+        let fullBodyVisible = isFullBodyVisible(pose)
+
+        return CameraObservation(
+            exercise: exercise,
+            workoutStage: String(describing: stage),
+            targetReps: targetReps,
+            reps: snapshot.reps,
+            phase: snapshot.phase,
+            activeIssues: snapshot.activeIssues,
+            poseVisible: true,
+            fullBodyVisible: fullBodyVisible,
+            framing: framingLabel(bodyBox: box, fullBodyVisible: fullBodyVisible),
+            bodyBox: box,
+            avgConfidence: avgConfidence,
+            visibleKeypoints: landmarks.map(\.name),
+            keypoints: landmarks
+        )
+    }
+
+    /// Keypoints that must all be present for the athlete to count as "fully
+    /// in frame" — shoulders down to ankles.
+    private static let fullBodyKeypoints: [KeypointName] = [
+        .leftShoulder, .rightShoulder, .leftHip, .rightHip,
+        .leftKnee, .rightKnee, .leftAnkle, .rightAnkle
+    ]
+
+    private func isFullBodyVisible(_ pose: Pose) -> Bool {
+        WorkoutController.fullBodyKeypoints.allSatisfy { pose.keypoints[$0] != nil }
+    }
+
+    private func poseLandmarks(from pose: Pose) -> [PoseLandmark] {
+        pose.keypoints.values
+            .sorted { $0.name.rawValue < $1.name.rawValue }
+            .map {
+                PoseLandmark(name: $0.name.rawValue,
+                             x: rounded(Double($0.x)),
+                             y: rounded(Double($0.y)),
+                             confidence: rounded($0.score))
+            }
+    }
+
+    private func bodyBox(from landmarks: [PoseLandmark]) -> BodyBox {
+        let xs = landmarks.map(\.x)
+        let ys = landmarks.map(\.y)
+        return BodyBox(minX: rounded(xs.min() ?? 0),
+                       minY: rounded(ys.min() ?? 0),
+                       maxX: rounded(xs.max() ?? 0),
+                       maxY: rounded(ys.max() ?? 0))
+    }
+
+    /// Framing label for a pose, computed end-to-end from its keypoints.
+    private func framingLabel(for pose: Pose) -> String {
+        let box = bodyBox(from: poseLandmarks(from: pose))
+        return framingLabel(bodyBox: box, fullBodyVisible: isFullBodyVisible(pose))
+    }
+
+    private func framingLabel(bodyBox: BodyBox, fullBodyVisible: Bool) -> String {
+        if !fullBodyVisible { return "partial_body_visible" }
+        let width = bodyBox.maxX - bodyBox.minX
+        let height = bodyBox.maxY - bodyBox.minY
+        if bodyBox.minX < 0.04 || bodyBox.maxX > 0.96 || bodyBox.minY < 0.04 || bodyBox.maxY > 0.96 {
+            return "near_edge_of_frame"
+        }
+        if width < 0.18 || height < 0.35 { return "too_far_from_camera" }
+        if width > 0.85 || height > 0.90 { return "too_close_to_camera" }
+        return "well_framed"
+    }
+
+    private func rounded(_ value: Double) -> Double {
+        (value * 1000).rounded() / 1000
+    }
+
+    private func describeVisualFrame(_ jpegData: Data, capturedAt: Int) {
+        guard stage != .finished else { return }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await BackendClient.describeFrame(
+                    exercise: self.exercise,
+                    jpegData: jpegData,
+                    capturedAt: capturedAt
+                )
+                guard result.capturedAt >= self.latestVisualCaptureSentAt else { return }
+                self.latestVisualCaptureSentAt = result.capturedAt
+
+                let observation = VisualObservation(
+                    exercise: self.exercise,
+                    workoutStage: String(describing: self.stage),
+                    reps: self.snapshot.reps,
+                    description: result.description,
+                    facts: result.facts,
+                    model: result.model,
+                    capturedAt: result.capturedAt,
+                    analyzedAt: result.analyzedAt,
+                    receivedAt: Int(Date().timeIntervalSince1970 * 1000)
+                )
+                self.realtime.sendEvent(.visualObservation(observation),
+                                        requestSpeech: false,
+                                        queueIfDisconnected: true)
+            } catch {
+                print("[vision] describe frame failed: \(error.localizedDescription)")
+            }
+        }
+    }
 }
 
 struct WorkoutView: View {
@@ -436,6 +604,10 @@ private struct WorkoutSession: View {
                         .background(Theme.warn)
                         .clipShape(Capsule())
                 }
+                Spacer(minLength: 0)
+                if CameraSession.hasCamera(at: .back) {
+                    flipCameraButton
+                }
             }
             Button(action: finishNow) {
                 Text("End set")
@@ -448,6 +620,25 @@ private struct WorkoutSession: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Circular control that flips between the front and back camera.
+    private var flipCameraButton: some View {
+        Button(action: { controller.flipCamera() }) {
+            Image(systemName: "arrow.triangle.2.circlepath.camera")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(controller.usingBackCamera ? Theme.accent : Theme.text)
+                .frame(width: 46, height: 46)
+                .background(Color.black.opacity(0.72))
+                .clipShape(Circle())
+                .overlay(
+                    Circle().strokeBorder(
+                        controller.usingBackCamera ? Theme.accent : Theme.border, lineWidth: 1)
+                )
+        }
+        .accessibilityLabel(controller.usingBackCamera
+                            ? "Switch to front camera"
+                            : "Switch to back camera")
     }
 
     private func formatTime(ms: Int) -> String {

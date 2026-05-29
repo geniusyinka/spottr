@@ -70,7 +70,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
                 type: 'semantic_vad',
                 eagerness: 'auto',
                 create_response: true,
-                interrupt_response: true,
+                interrupt_response: false,
               },
               transcription: { model: 'whisper-1' },
             },

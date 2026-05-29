@@ -33,11 +33,13 @@ final class RealtimeClient: NSObject, ObservableObject {
 
     /// True while OpenAI is actively producing a response. Sending another
     /// `response.create` while this is true returns
-    /// "Conversation already has an active response in progress". We instead
-    /// `response.cancel` the in-flight one and queue a single replacement.
+    /// "Conversation already has an active response in progress". Normal
+    /// event speech is dropped while audio is in flight; important cues are
+    /// collapsed into one follow-up response after the current audio ends.
     private var isResponding: Bool = false
-    /// At most one pending replacement — newer requests collapse into it.
-    private var pendingReplacementSpeech: Bool = false
+    private var pendingImportantSpeech: Bool = false
+    private var lastSpeechRequestAt: TimeInterval = 0
+    private let minEventSpeechInterval: TimeInterval = 6.0
 
     init(exercise: ExerciseId, targetReps: Int?, athleteName: String? = nil) {
         self.exercise = exercise
@@ -91,44 +93,65 @@ final class RealtimeClient: NSObject, ObservableObject {
         }
     }
 
-    func sendEvent(_ event: CoachEvent, requestSpeech: Bool = false) {
+    func sendEvent(_ event: CoachEvent,
+                   requestSpeech: Bool = false,
+                   queueIfDisconnected: Bool = true) {
         guard let dc = dc, dc.readyState == .open else {
-            pendingEvents.append((event, requestSpeech))
+            if queueIfDisconnected {
+                enqueuePendingEvent(event, requestSpeech: requestSpeech)
+            }
             return
         }
         do {
             let item = try RealtimeEnvelope.conversationItem(for: event)
             dc.sendData(RTCDataBuffer(data: item, isBinary: false))
             if requestSpeech {
-                requestSpeechNow(dc: dc)
+                requestSpeechNow(dc: dc, important: isImportantSpeechEvent(event))
             }
         } catch {
             print("[realtime] failed to encode event: \(error)")
         }
     }
 
-    /// Internal helper. Handles the in-flight-response collision by cancelling
-    /// the active response and queuing exactly one replacement, so the most
-    /// recent cue always wins without piling up duplicate `response.create`s.
-    private func requestSpeechNow(dc: RTCDataChannel) {
-        if isResponding {
-            // A response is mid-stream. Cancel it; on response.done we'll fire
-            // a fresh response.create.
-            do {
-                let cancel = try RealtimeEnvelope.responseCancel()
-                dc.sendData(RTCDataBuffer(data: cancel, isBinary: false))
-                pendingReplacementSpeech = true
-            } catch {
-                print("[realtime] failed to encode response.cancel: \(error)")
+    /// Internal helper. Avoids overlapping `response.create` calls. Important
+    /// cues are queued as one follow-up; normal cues obey a short cooldown.
+    private func enqueuePendingEvent(_ event: CoachEvent, requestSpeech: Bool) {
+        if case .visualObservation = event {
+            pendingEvents.removeAll { queued in
+                if case .visualObservation = queued.event { return true }
+                return false
             }
+        }
+        pendingEvents.append((event, requestSpeech))
+    }
+
+    private func requestSpeechNow(dc: RTCDataChannel, important: Bool = false) {
+        if isResponding {
+            pendingImportantSpeech = pendingImportantSpeech || important
             return
         }
+        let now = Date().timeIntervalSinceReferenceDate
+        guard important || now - lastSpeechRequestAt >= minEventSpeechInterval else { return }
         do {
             let req = try RealtimeEnvelope.responseCreate()
             dc.sendData(RTCDataBuffer(data: req, isBinary: false))
             isResponding = true
+            lastSpeechRequestAt = now
         } catch {
             print("[realtime] failed to encode response.create: \(error)")
+        }
+    }
+
+    private func isImportantSpeechEvent(_ event: CoachEvent) -> Bool {
+        switch event {
+        case .setReady, .setFinished, .coachShouldSpeak:
+            return true
+        case .repCompleted(let rep):
+            return rep.index == targetReps || rep.issues.contains { $0.severity == .severe }
+        case .formIssue(_, _, let severity):
+            return severity == .severe
+        case .setStarted, .cameraObservation, .visualObservation:
+            return false
         }
     }
 
@@ -222,8 +245,8 @@ final class RealtimeClient: NSObject, ObservableObject {
         case "error":
             let err = msg["error"] as? [String: Any]
             let m = (err?["message"] as? String) ?? "unknown realtime error"
-            // Suppress the "active response in progress" race — we already
-            // handle it client-side by cancelling + replacing.
+            // Suppress the "active response in progress" race. We avoid
+            // overlapping response.create calls client-side.
             if (err?["code"] as? String) != "conversation_already_has_active_response" {
                 lastError = m
             }
@@ -249,11 +272,9 @@ final class RealtimeClient: NSObject, ObservableObject {
         case "response.done", "response.cancelled":
             isResponding = false
             setState(.connected)
-            // If a newer cue piled up while this one was streaming/cancelling,
-            // fire it now.
-            if pendingReplacementSpeech, let dc = dc, dc.readyState == .open {
-                pendingReplacementSpeech = false
-                requestSpeechNow(dc: dc)
+            if pendingImportantSpeech, let dc = dc, dc.readyState == .open {
+                pendingImportantSpeech = false
+                requestSpeechNow(dc: dc, important: true)
             }
         default:
             break

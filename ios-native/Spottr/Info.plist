@@ -28,7 +28,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Spottr uses the camera to analyze your exercise form on-device. Frames are not recorded.</string>
+	<string>Spottr uses the camera for on-device pose tracking and sends occasional compressed snapshots to the coaching backend for visual form checks. Frames are not recorded.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Spottr connects to the coaching backend running on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
