@@ -28,11 +28,13 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Spottr uses the camera to analyze your exercise form on-device. Frames are not recorded.</string>
+	<string>Spottr uses the camera for on-device pose tracking, optional session recording, and occasional compressed snapshots for visual form checks.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Spottr connects to the coaching backend running on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Spottr uses the microphone so you can talk to your AI coach.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Spottr saves optional workout recordings to your Photos library when you enable session recording.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

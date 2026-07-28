@@ -13,7 +13,7 @@
 
 You pick an exercise (squat, push-up, pull-up), prop your phone where the camera can see your whole body, and start a set. Spottr does the rest:
 
-- **Pose detection runs on-device** (Apple's Vision framework) — no video ever leaves your phone.
+- **Pose detection runs on-device** (Apple's Vision framework), and occasional compressed snapshots are sent to the backend for semantic visual checks.
 - **Reps are counted automatically** from joint angles, with form checks per exercise (e.g. squat depth, knee valgus; push-up hip sag, partial range; pull-up chin-over-bar, kipping).
 - **A real-time voice coach** (OpenAI Realtime, `gpt-realtime`) speaks through your headphones. It greets you when the camera locks on, calls out form issues as they happen, gives milestone callouts, and answers questions you ask out loud mid-set.
 - **The coach knows what it can and can't see.** It only receives structured movement events — never raw video — and the system prompt makes it answer honestly when asked about things it can't verify ("I can't tell that from the data I have").
@@ -141,12 +141,14 @@ The coach is `gpt-realtime` driven by:
    - `coach_should_speak` — explicit "say something now" trigger
 3. **Your voice**, transcribed and turn-detected via `semantic_vad` with `eagerness: low` so it ignores grunts and breathing.
 
-The model has **no video feed** — it sees rep counts, durations, and a small enumerated set of form flags. The prompt explicitly tells it to admit that. Ask it "what variant am I doing" or "what am I wearing" and it'll say "I can't tell that from the data I have" instead of inventing.
+The realtime coach receives two streams: structured pose/form events, plus strict `visual_observation` facts produced from actual camera snapshots. Ask it "what variant am I doing" or "what am I wearing" and it should answer from the latest visual snapshot only; if the snapshot is missing, stale, blocked, or unclear, it must say it cannot see that detail clearly.
 
 ## Privacy
 
-- Camera frames are passed to `VNDetectHumanBodyPoseRequest` in-memory and discarded. **Never persisted, never uploaded.**
-- Only structured numbers and enums (rep index, joint angle thresholds crossed, etc.) flow over the data channel to OpenAI.
+- Camera frames are passed to `VNDetectHumanBodyPoseRequest` in-memory and discarded on-device for pose tracking.
+- Every few seconds, a compressed JPEG snapshot is sent to `/api/vision/describe`, which sends it to OpenAI's Responses API for visual analysis. The backend returns structured visual facts to the realtime coach; snapshots are not stored by this app.
+- Session recording is off by default. If enabled before a set, iOS records the workout screen, microphone audio, and app audio, saves the movie locally, requests add-only Photos permission, and writes the recording to Photos when allowed.
+- Structured numbers/enums and structured visual facts flow over the realtime data channel to OpenAI.
 - Microphone audio is uploaded to OpenAI Realtime over WebRTC for the voice coach. Toggle it off via `realtime.setMicEnabled(false)` if you want to mute.
 - Long-lived API keys stay on the backend; the phone only sees ~60s ephemeral session tokens.
 

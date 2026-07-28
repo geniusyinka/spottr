@@ -75,7 +75,8 @@ ios-native/
     │   └── PushupAnalyzer.swift
     ├── Pose/
     │   ├── CameraSession.swift    # AVCaptureSession
-    │   └── PoseDetector.swift     # VNDetectHumanBodyPoseRequest
+    │   ├── PoseDetector.swift     # VNDetectHumanBodyPoseRequest
+    │   └── VisualFrameSampler.swift # compressed snapshots for semantic vision
     ├── Realtime/
     │   ├── BackendClient.swift    # POST /api/realtime/session
     │   ├── CoachEvent.swift       # event encoding + envelope helpers
@@ -92,7 +93,9 @@ ios-native/
 
 ## Privacy
 
-- Frames are processed in-memory by Vision and immediately discarded.
-- Only structured movement events flow over the Realtime data channel.
+- Frames are processed in-memory by Vision and immediately discarded for pose tracking.
+- Every few seconds, a compressed JPEG snapshot is sent to the backend for semantic vision. The backend returns structured visual facts; snapshots are not stored by this app.
+- Session recording is off by default. If enabled before a set, ReplayKit records the workout screen, microphone audio, and app audio, then saves the movie locally and to Photos when the user grants add-only Photos permission.
+- Structured movement events and structured visual facts flow over the Realtime data channel.
 - The mic stream goes to OpenAI Realtime over WebRTC for the voice coach;
   toggle off via `realtime.setMicEnabled(false)` if you want to mute.

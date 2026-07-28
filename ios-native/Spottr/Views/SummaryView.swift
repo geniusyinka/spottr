@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 
 struct SummaryView: View {
@@ -49,6 +50,49 @@ struct SummaryView: View {
                                 RoundedRectangle(cornerRadius: Radius.md)
                                     .strokeBorder(Theme.border, lineWidth: 1)
                             )
+                    }
+
+                    if let recordingURL = summary.recordingURL {
+                        section("RECORDING") {
+                            VStack(alignment: .leading, spacing: Spacing.sm) {
+                                VideoPlayer(player: AVPlayer(url: recordingURL))
+                                    .frame(maxWidth: .infinity)
+                                    .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                                    .background(Color.black)
+                                    .cornerRadius(Radius.md)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: Radius.md)
+                                            .strokeBorder(Theme.border, lineWidth: 1)
+                                    )
+                                Text(recordingURL.lastPathComponent)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(Theme.text)
+                                    .lineLimit(1)
+                                Text(summary.recordingPhotoSaveState.summaryText)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(Theme.textDim)
+                                ShareLink(item: recordingURL) {
+                                    HStack {
+                                        Image(systemName: "square.and.arrow.up")
+                                        Text("Share recording")
+                                    }
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, Spacing.md)
+                                    .background(Theme.accent)
+                                    .cornerRadius(Radius.md)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(Spacing.md)
+                            .background(Theme.card)
+                            .cornerRadius(Radius.md)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Radius.md)
+                                    .strokeBorder(Theme.border, lineWidth: 1)
+                            )
+                        }
                     }
                 } else {
                     Text("No set data — start a new set.")

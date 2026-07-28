@@ -24,7 +24,7 @@ Returns `{ ok: true, service: 'spottr-server' }`.
 ### `POST /api/realtime/session`
 Body:
 ```json
-{ "exercise": "squat" | "pushup", "targetReps": 10, "voice": "verse" }
+{ "exercise": "squat" | "pushup" | "pullup", "targetReps": 10, "voice": "marin" }
 ```
 Returns:
 ```json
@@ -32,13 +32,27 @@ Returns:
   "sessionId": "sess_...",
   "clientSecret": "ek_...",
   "expiresAt": 1700000000,
-  "model": "gpt-4o-realtime-preview-2024-12-17",
-  "voice": "verse"
+  "model": "gpt-realtime",
+  "voice": "marin"
 }
 ```
 
 The mobile app uses `clientSecret` for the WebRTC handshake against
-`https://api.openai.com/v1/realtime?model=...`.
+`https://api.openai.com/v1/realtime/calls?model=...`.
+
+### `POST /api/vision/describe`
+Body:
+```json
+{
+  "exercise": "squat",
+  "mimeType": "image/jpeg",
+  "imageBase64": "...",
+  "clientCapturedAt": 1700000000000
+}
+```
+
+Validates real JPEG/PNG bytes, sends the image to OpenAI's Responses API as an
+`input_image`, and returns strict structured visual facts for the realtime coach.
 
 ## Notes
 
