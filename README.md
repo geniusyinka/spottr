@@ -147,6 +147,7 @@ The realtime coach receives two streams: structured pose/form events, plus stric
 
 - Camera frames are passed to `VNDetectHumanBodyPoseRequest` in-memory and discarded on-device for pose tracking.
 - Every few seconds, a compressed JPEG snapshot is sent to `/api/vision/describe`, which sends it to OpenAI's Responses API for visual analysis. The backend returns structured visual facts to the realtime coach; snapshots are not stored by this app.
+- Session recording is off by default. If enabled before a set, iOS records the workout screen, microphone audio, and app audio, saves the movie locally, requests add-only Photos permission, and writes the recording to Photos when allowed.
 - Structured numbers/enums and structured visual facts flow over the realtime data channel to OpenAI.
 - Microphone audio is uploaded to OpenAI Realtime over WebRTC for the voice coach. Toggle it off via `realtime.setMicEnabled(false)` if you want to mute.
 - Long-lived API keys stay on the backend; the phone only sees ~60s ephemeral session tokens.
