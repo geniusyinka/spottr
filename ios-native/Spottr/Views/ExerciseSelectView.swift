@@ -20,6 +20,10 @@ struct ExerciseSelectView: View {
                     .padding(.top, Spacing.md)
                 repsRow
 
+                label("Recording")
+                    .padding(.top, Spacing.md)
+                recordingToggle
+
                 Spacer(minLength: Spacing.lg)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -79,6 +83,27 @@ struct ExerciseSelectView: View {
                 .background(Theme.accent)
                 .cornerRadius(Radius.lg)
         }
+    }
+
+    private var recordingToggle: some View {
+        Toggle(isOn: $session.recordSession) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Record this session")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(Theme.text)
+                Text("Captures the workout screen, your mic, and the coach audio.")
+                    .font(.system(size: 13))
+                    .foregroundColor(Theme.textDim)
+            }
+        }
+        .toggleStyle(SwitchToggleStyle(tint: Theme.accent))
+        .padding(Spacing.md)
+        .background(Theme.card)
+        .cornerRadius(Radius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.md)
+                .strokeBorder(session.recordSession ? Theme.accent : Theme.border, lineWidth: 1)
+        )
     }
 
     private func start() {

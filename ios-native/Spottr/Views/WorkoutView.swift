@@ -25,14 +25,18 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     @Published var stage: WorkoutStage = .waiting
     /// Set when the user (or auto-finish) ends the set; the view navigates.
     @Published var didFinish: Bool = false
+    @Published var recordingURL: URL? = nil
+    @Published var recordingPhotoSaveState: PhotoSaveState = .notRequested
     /// True when the back camera is the active feed (default is the front).
     @Published private(set) var usingBackCamera: Bool = false
 
     let camera = CameraSession()
     let realtime: RealtimeClient
+    let sessionRecorder = SessionRecorder()
 
     private let exercise: ExerciseId
     private let targetReps: Int
+    private let shouldRecordSession: Bool
     private let analyzer: ExerciseAnalyzer
     private let detector = PoseDetector()
     private let visualFrameSampler = VisualFrameSampler(interval: 3.0)
@@ -44,6 +48,7 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     private var realtimeStateObservation: AnyCancellable?
     private var realtimeErrorObservation: AnyCancellable?
     private var finishTask: Task<Void, Never>? = nil
+    private var isFinishing = false
 
     /// Continuous frames in which we've seen a confident full-body pose.
     private var stableFrameCount: Int = 0
@@ -53,9 +58,10 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     private let cameraObservationInterval: TimeInterval = 1.0
     private var latestVisualCaptureSentAt: Int = 0
 
-    init(exercise: ExerciseId, targetReps: Int, athleteName: String?) {
+    init(exercise: ExerciseId, targetReps: Int, athleteName: String?, shouldRecordSession: Bool) {
         self.exercise = exercise
         self.targetReps = targetReps
+        self.shouldRecordSession = shouldRecordSession
         self.analyzer = AnalyzerFactory.make(for: exercise)
         self.realtime = RealtimeClient(exercise: exercise,
                                        targetReps: targetReps,
@@ -67,6 +73,9 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     func start() {
         camera.start()
 
+        if shouldRecordSession {
+            Task { await sessionRecorder.start() }
+        }
         Task { await realtime.connect() }
 
         // Timer ticks all the time but only displays elapsed once active.
@@ -91,15 +100,15 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
         realtimeErrorObservation?.cancel()
         camera.stop()
         realtime.close()
+        if sessionRecorder.state.isActive {
+            Task { _ = await sessionRecorder.stop() }
+        }
     }
 
     // MARK: - User actions
 
     func endSet() {
-        guard !didFinish else { return }
-        didFinish = true
-        stage = .finished
-        emitSummary()
+        finishSet(includeTargetCueDelay: false)
     }
 
     /// Flip between the front (selfie) and back camera mid-session. The pose
@@ -111,19 +120,40 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
 
     /// Called by the view when the analyzer detects rep ≥ target.
     private func handleTargetReached() {
-        guard !didFinish else { return }
-        didFinish = true
-        stage = .finished
+        guard !isFinishing, !didFinish else { return }
         realtime.requestSpeech(reason: "set_target_reached")
-        // Allow ~3.5s for the milestone cue to play before tearing down.
+        finishSet(includeTargetCueDelay: true)
+    }
+
+    private func finishSet(includeTargetCueDelay: Bool) {
+        guard !isFinishing, !didFinish else { return }
+        isFinishing = true
+        stage = .finished
+
         finishTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 3_500_000_000)
-            self?.emitSummary()
+            guard let self else { return }
+            if includeTargetCueDelay {
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+            }
+
+            self.emitSummary()
+
+            if self.shouldRecordSession {
+                // Give the final coach cue a short tail so the saved replay
+                // includes the two-way audio around set completion.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if let result = await self.sessionRecorder.stop() {
+                    self.recordingURL = result.url
+                    self.recordingPhotoSaveState = result.photoSaveState
+                }
+            }
+
+            self.didFinish = true
         }
     }
 
     private func emitSummary() {
-        let durationMs = stage == .active ? Int((CACurrentMediaTime() - startedAt) * 1000) : 0
+        let durationMs = elapsedMs > 0 ? elapsedMs : (stage == .active ? Int((CACurrentMediaTime() - startedAt) * 1000) : 0)
         let stats = analyzer.setStats()
         realtime.sendEvent(.setFinished(
             exercise: exercise,
@@ -397,7 +427,8 @@ struct WorkoutView: View {
     var body: some View {
         WorkoutSession(exercise: session.exercise,
                        targetReps: session.targetReps,
-                       athleteName: session.athleteName)
+                       athleteName: session.athleteName,
+                       shouldRecordSession: session.recordSession)
     }
 }
 
@@ -406,9 +437,12 @@ private struct WorkoutSession: View {
     @StateObject private var controller: WorkoutController
     @State private var permissionDenied = false
 
-    init(exercise: ExerciseId, targetReps: Int, athleteName: String) {
+    init(exercise: ExerciseId, targetReps: Int, athleteName: String, shouldRecordSession: Bool) {
         _controller = StateObject(wrappedValue: WorkoutController(
-            exercise: exercise, targetReps: targetReps, athleteName: athleteName))
+            exercise: exercise,
+            targetReps: targetReps,
+            athleteName: athleteName,
+            shouldRecordSession: shouldRecordSession))
     }
 
     var body: some View {
@@ -421,6 +455,9 @@ private struct WorkoutSession: View {
                 hud
                 if let err = controller.coachError {
                     errorBanner(err)
+                }
+                if case .failed(let message) = controller.sessionRecorder.state {
+                    errorBanner("Recording: \(message)")
                 }
                 if !controller.snapshot.activeIssues.isEmpty {
                     issueBanner
@@ -453,7 +490,9 @@ private struct WorkoutSession: View {
                 let summary = SetSummary.build(
                     exercise: session.exercise,
                     reps: controller.collectedRepsSnapshot,
-                    durationMs: durationMs)
+                    durationMs: durationMs,
+                    recordingURL: controller.recordingURL,
+                    recordingPhotoSaveState: controller.recordingPhotoSaveState)
                 session.summary = summary
                 session.goSummary()
             }
@@ -472,13 +511,7 @@ private struct WorkoutSession: View {
     /// in an error state. Builds the summary inline from whatever reps the
     /// controller has collected, then pushes the Summary screen.
     private func finishNow() {
-        controller.endSet() // best-effort: notifies the coach + sets stage
-        let summary = SetSummary.build(
-            exercise: session.exercise,
-            reps: controller.collectedRepsSnapshot,
-            durationMs: controller.elapsedMs)
-        session.summary = summary
-        session.goSummary()
+        controller.endSet()
     }
 
     // MARK: - Subviews
@@ -521,7 +554,31 @@ private struct WorkoutSession: View {
                 stat("SCORE", controller.snapshot.lastScore.map { "\(Int($0 * 100))" } ?? "—")
             }
             cueBox
+            if controller.sessionRecorder.state.isActive || controller.recordingURL != nil {
+                recordingBanner
+            }
         }
+    }
+
+    private var recordingBanner: some View {
+        HStack(spacing: Spacing.sm) {
+            Circle()
+                .fill(Theme.bad)
+                .frame(width: 8, height: 8)
+            Text(recordingLabel(controller.sessionRecorder.state))
+                .font(.system(size: 12, weight: .bold))
+                .tracking(0.8)
+                .foregroundColor(Theme.text)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm + 2)
+        .background(Color.black.opacity(0.78))
+        .cornerRadius(Radius.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.md)
+                .strokeBorder(Theme.bad.opacity(0.8), lineWidth: 1)
+        )
     }
 
     private var cueBox: some View {
@@ -655,6 +712,23 @@ private struct WorkoutSession: View {
         case .speaking: return "Coach speaking"
         case .error: return "Coach offline"
         case .closed: return "Coach disconnected"
+        }
+    }
+
+    private func recordingLabel(_ state: SessionRecordingState) -> String {
+        switch state {
+        case .idle:
+            return "Recording ready"
+        case .starting:
+            return "Starting recording"
+        case .recording:
+            return "Recording"
+        case .stopping:
+            return "Saving recording"
+        case .saved:
+            return "Recording saved"
+        case .failed:
+            return "Recording failed"
         }
     }
 }

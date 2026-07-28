@@ -9,6 +9,7 @@ final class SessionState: ObservableObject {
     @Published var exercise: ExerciseId = .squat
     @Published var targetReps: Int = 10
     @Published var summary: SetSummary? = nil
+    @Published var recordSession: Bool = false
     /// Athlete's first name. Persisted to UserDefaults so the coach addresses
     /// them by name across launches.
     @Published var athleteName: String = UserDefaults.standard.string(forKey: "spottr.athleteName") ?? "Yinka" {
@@ -35,14 +36,20 @@ struct SetSummary: Equatable {
     let durationMs: Int
     let topIssues: [FormIssueId]
     let recommendation: String
+    let recordingURL: URL?
+    let recordingPhotoSaveState: PhotoSaveState
 
     static func build(exercise: ExerciseId,
                       reps: [RepCompleted],
-                      durationMs: Int) -> SetSummary {
+                      durationMs: Int,
+                      recordingURL: URL? = nil,
+                      recordingPhotoSaveState: PhotoSaveState = .notRequested) -> SetSummary {
         guard !reps.isEmpty else {
             return SetSummary(exercise: exercise, reps: 0, avgScore: 0, durationMs: durationMs,
                               topIssues: [],
-                              recommendation: "No reps detected — try positioning yourself fully in frame and starting again.")
+                              recommendation: "No reps detected — try positioning yourself fully in frame and starting again.",
+                              recordingURL: recordingURL,
+                              recordingPhotoSaveState: recordingPhotoSaveState)
         }
         let avg = reps.map(\.score).reduce(0, +) / Double(reps.count)
 
@@ -56,7 +63,9 @@ struct SetSummary: Equatable {
             avgScore: avg,
             durationMs: durationMs,
             topIssues: Array(top),
-            recommendation: Self.nextSetRecommendation(reps: reps.count, avg: avg, top: Array(top))
+            recommendation: Self.nextSetRecommendation(reps: reps.count, avg: avg, top: Array(top)),
+            recordingURL: recordingURL,
+            recordingPhotoSaveState: recordingPhotoSaveState
         )
     }
 
