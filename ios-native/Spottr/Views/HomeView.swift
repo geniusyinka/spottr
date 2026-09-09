@@ -18,15 +18,33 @@ struct HomeView: View {
 
                 nameField
 
-                Button(action: { session.goExerciseSelect() }) {
-                    Text("Start a set")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, Spacing.md + 4)
-                        .background(Theme.accent)
-                        .cornerRadius(Radius.lg)
+                HStack(spacing: Spacing.sm) {
+                    Button(action: { session.goExerciseSelect() }) {
+                        Text("Start a set")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                            .padding(.horizontal, Spacing.sm)
+                            .background(Theme.accent)
+                            .cornerRadius(Radius.lg)
+                    }
+                    Button(action: { session.startHypeSession() }) {
+                        Text("Just pure motivation")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(Theme.text)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                            .padding(.horizontal, Spacing.sm)
+                            .background(Theme.card)
+                            .cornerRadius(Radius.lg)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Radius.lg)
+                                    .strokeBorder(Theme.border, lineWidth: 1)
+                            )
+                    }
                 }
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, Spacing.sm)
 
                 disclaimerCard

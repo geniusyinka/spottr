@@ -13,6 +13,8 @@ const SessionRequest = z.object({
   voice: z.string().optional(),
   targetReps: z.number().int().positive().max(50).optional(),
   athleteName: z.string().min(1).max(40).optional(),
+  // 'hype' = motivation-only session: no form coaching in the prompt.
+  mode: z.enum(['form', 'hype']).optional(),
 });
 
 /**
@@ -44,7 +46,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: 'invalid request', details: parsed.error.flatten() });
   }
 
-  const { exercise, voice, targetReps, athleteName } = parsed.data;
+  const { exercise, voice, targetReps, athleteName, mode } = parsed.data;
   const chosenVoice = voice ?? DEFAULT_VOICE;
 
   try {
@@ -58,7 +60,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         session: {
           type: 'realtime',
           model: DEFAULT_MODEL,
-          instructions: coachInstructions({ exercise, targetReps, athleteName }),
+          instructions: coachInstructions({ exercise, targetReps, athleteName, mode }),
           output_modalities: ['audio'],
           audio: {
             input: {

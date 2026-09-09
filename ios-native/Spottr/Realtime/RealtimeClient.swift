@@ -25,6 +25,7 @@ final class RealtimeClient: NSObject, ObservableObject {
     private let exercise: ExerciseId
     private let targetReps: Int?
     private let athleteName: String?
+    private let mode: CoachMode
     private var pc: RTCPeerConnection?
     private var dc: RTCDataChannel?
     private var audioTrack: RTCAudioTrack?
@@ -41,10 +42,12 @@ final class RealtimeClient: NSObject, ObservableObject {
     private var lastSpeechRequestAt: TimeInterval = 0
     private let minEventSpeechInterval: TimeInterval = 6.0
 
-    init(exercise: ExerciseId, targetReps: Int?, athleteName: String? = nil) {
+    init(exercise: ExerciseId, targetReps: Int?, athleteName: String? = nil,
+         mode: CoachMode = .form) {
         self.exercise = exercise
         self.targetReps = targetReps
         self.athleteName = athleteName
+        self.mode = mode
         super.init()
     }
 
@@ -61,7 +64,8 @@ final class RealtimeClient: NSObject, ObservableObject {
 
             setState(.fetchingSession)
             let session = try await BackendClient.createRealtimeSession(
-                exercise: exercise, targetReps: targetReps, athleteName: athleteName)
+                exercise: exercise, targetReps: targetReps, athleteName: athleteName,
+                mode: mode)
 
             setState(.connecting)
             let pc = makePeerConnection()

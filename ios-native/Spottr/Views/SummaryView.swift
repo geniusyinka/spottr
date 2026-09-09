@@ -8,36 +8,45 @@ struct SummaryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 if let summary = session.summary {
-                    Text("\(summary.exercise.displayName) set")
+                    Text(summary.mode == .hype
+                         ? "Motivation session"
+                         : "\(summary.exercise.displayName) set")
                         .font(.system(size: 28, weight: .bold))
                         .foregroundColor(Theme.text)
                         .padding(.bottom, Spacing.md)
 
                     HStack(spacing: Spacing.sm) {
-                        stat("REPS", "\(summary.reps)")
-                        stat("AVG SCORE",
-                             "\(Int(summary.avgScore * 100))",
-                             accent: summary.avgScore >= 0.75)
-                        stat("TIME", formatDuration(ms: summary.durationMs))
+                        if summary.mode == .hype {
+                            // No rep target or form scoring in a hype session.
+                            stat("TIME", formatDuration(ms: summary.durationMs), accent: true)
+                        } else {
+                            stat("REPS", "\(summary.reps)")
+                            stat("AVG SCORE",
+                                 "\(Int(summary.avgScore * 100))",
+                                 accent: summary.avgScore >= 0.75)
+                            stat("TIME", formatDuration(ms: summary.durationMs))
+                        }
                     }
 
-                    section("TOP ISSUES") {
-                        if summary.topIssues.isEmpty {
-                            Text("No major issues — clean set.")
-                                .foregroundColor(Theme.textDim)
-                        } else {
-                            ForEach(summary.topIssues, id: \.self) { id in
-                                HStack(spacing: Spacing.sm) {
-                                    Circle().fill(Theme.warn).frame(width: 8, height: 8)
-                                    Text(id.label)
-                                        .font(.system(size: 16))
-                                        .foregroundColor(Theme.text)
+                    if summary.mode == .form {
+                        section("TOP ISSUES") {
+                            if summary.topIssues.isEmpty {
+                                Text("No major issues — clean set.")
+                                    .foregroundColor(Theme.textDim)
+                            } else {
+                                ForEach(summary.topIssues, id: \.self) { id in
+                                    HStack(spacing: Spacing.sm) {
+                                        Circle().fill(Theme.warn).frame(width: 8, height: 8)
+                                        Text(id.label)
+                                            .font(.system(size: 16))
+                                            .foregroundColor(Theme.text)
+                                    }
                                 }
                             }
                         }
                     }
 
-                    section("NEXT SET") {
+                    section(summary.mode == .hype ? "NEXT TIME" : "NEXT SET") {
                         Text(summary.recommendation)
                             .font(.system(size: 16))
                             .foregroundColor(Theme.text)
@@ -103,7 +112,7 @@ struct SummaryView: View {
                 Spacer(minLength: Spacing.lg)
 
                 Button(action: { session.startNewSet() }) {
-                    Text("Start next set")
+                    Text(session.summary?.mode == .hype ? "Go again" : "Start next set")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
                         .frame(maxWidth: .infinity)

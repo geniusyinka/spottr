@@ -62,12 +62,13 @@ enum BackendClient {
     /// uses to open a WebRTC connection directly to OpenAI Realtime.
     static func createRealtimeSession(exercise: ExerciseId,
                                       targetReps: Int?,
-                                      athleteName: String?) async throws -> EphemeralSession {
+                                      athleteName: String?,
+                                      mode: CoachMode = .form) async throws -> EphemeralSession {
         var req = URLRequest(url: BackendConfig.baseURL.appending(path: "/api/realtime/session"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        var body: [String: Any] = ["exercise": exercise.rawValue]
+        var body: [String: Any] = ["exercise": exercise.rawValue, "mode": mode.rawValue]
         if let t = targetReps { body["targetReps"] = t }
         if let n = athleteName, !n.isEmpty { body["athleteName"] = n }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)

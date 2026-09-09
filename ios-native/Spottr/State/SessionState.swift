@@ -1,11 +1,19 @@
 import Foundation
 import SwiftUI
 
+/// How the realtime coach behaves for a session. `.form` is the full
+/// form-analysis flow; `.hype` skips exercise selection and form feedback —
+/// the coach only motivates.
+enum CoachMode: String {
+    case form, hype
+}
+
 /// Top-level app state shared across screens. Tiny enough to live in a single
 /// `ObservableObject`; the workout's analyzer is owned by `WorkoutView`.
 @MainActor
 final class SessionState: ObservableObject {
     @Published var path: [Route] = []
+    @Published var mode: CoachMode = .form
     @Published var exercise: ExerciseId = .squat
     @Published var targetReps: Int = 10
     @Published var summary: SetSummary? = nil
@@ -16,7 +24,15 @@ final class SessionState: ObservableObject {
         didSet { UserDefaults.standard.set(athleteName, forKey: "spottr.athleteName") }
     }
 
-    func goExerciseSelect() { path = [.exerciseSelect] }
+    func goExerciseSelect() {
+        mode = .form
+        path = [.exerciseSelect]
+    }
+    func startHypeSession() {
+        mode = .hype
+        summary = nil
+        path = [.workout]
+    }
     func goWorkout()        { path.append(.workout) }
     func goSummary()        {
         // Idempotent: only push if Summary isn't already at the top.
@@ -25,7 +41,8 @@ final class SessionState: ObservableObject {
     func popToHome()        { path.removeAll() }
     func startNewSet() {
         summary = nil
-        path = [.exerciseSelect]
+        // A motivation session restarts directly; the form flow re-picks the lift.
+        path = mode == .hype ? [.workout] : [.exerciseSelect]
     }
 }
 
@@ -38,12 +55,22 @@ struct SetSummary: Equatable {
     let recommendation: String
     let recordingURL: URL?
     let recordingPhotoSaveState: PhotoSaveState
+    var mode: CoachMode = .form
 
     static func build(exercise: ExerciseId,
                       reps: [RepCompleted],
                       durationMs: Int,
                       recordingURL: URL? = nil,
-                      recordingPhotoSaveState: PhotoSaveState = .notRequested) -> SetSummary {
+                      recordingPhotoSaveState: PhotoSaveState = .notRequested,
+                      mode: CoachMode = .form) -> SetSummary {
+        guard mode != .hype else {
+            return SetSummary(exercise: exercise, reps: reps.count, avgScore: 0, durationMs: durationMs,
+                              topIssues: [],
+                              recommendation: "Pure motivation session — no form analysis on this one. Nice work putting the time in.",
+                              recordingURL: recordingURL,
+                              recordingPhotoSaveState: recordingPhotoSaveState,
+                              mode: .hype)
+        }
         guard !reps.isEmpty else {
             return SetSummary(exercise: exercise, reps: 0, avgScore: 0, durationMs: durationMs,
                               topIssues: [],
