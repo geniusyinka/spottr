@@ -36,6 +36,7 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
 
     private let exercise: ExerciseId
     private let targetReps: Int
+    private let mode: CoachMode
     private let shouldRecordSession: Bool
     private let analyzer: ExerciseAnalyzer
     private let detector = PoseDetector()
@@ -57,15 +58,23 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
     private var lastCameraObservationSentAt: TimeInterval = 0
     private let cameraObservationInterval: TimeInterval = 1.0
     private var latestVisualCaptureSentAt: Int = 0
+    /// Hype mode keeps the energy up on a cadence instead of waiting for
+    /// rep/form events (there is no form feedback to trigger speech).
+    private var lastHypeCueAt: TimeInterval = 0
+    private let hypeCueInterval: TimeInterval = 20.0
 
-    init(exercise: ExerciseId, targetReps: Int, athleteName: String?, shouldRecordSession: Bool) {
+    init(exercise: ExerciseId, targetReps: Int, athleteName: String?,
+         mode: CoachMode, shouldRecordSession: Bool) {
         self.exercise = exercise
         self.targetReps = targetReps
+        self.mode = mode
         self.shouldRecordSession = shouldRecordSession
         self.analyzer = AnalyzerFactory.make(for: exercise)
+        // Hype sessions are open-ended: no rep target, motivation-only prompt.
         self.realtime = RealtimeClient(exercise: exercise,
-                                       targetReps: targetReps,
-                                       athleteName: athleteName)
+                                       targetReps: mode == .hype ? nil : targetReps,
+                                       athleteName: athleteName,
+                                       mode: mode)
         super.init()
         camera.delegate = self
     }
@@ -85,6 +94,11 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
                 guard let self else { return }
                 if self.stage == .active {
                     self.elapsedMs = Int((CACurrentMediaTime() - self.startedAt) * 1000)
+                    if self.mode == .hype,
+                       CACurrentMediaTime() - self.lastHypeCueAt >= self.hypeCueInterval {
+                        self.lastHypeCueAt = CACurrentMediaTime()
+                        self.realtime.requestSpeech(reason: "keep_the_energy_up")
+                    }
                 }
             }
 
@@ -203,10 +217,19 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
             stage = .ready
             // Tell the coach to greet so the athlete (with headphones on) hears it.
             realtime.sendEvent(.setReady(exercise: exercise,
-                                         targetReps: targetReps,
+                                         targetReps: mode == .hype ? nil : targetReps,
                                          framing: pose.map { framingLabel(for: $0) } ?? "well_framed",
                                          fullBodyVisible: true),
                                requestSpeech: true)
+            // Hype sessions don't wait for a first counted rep — the clock and
+            // the motivation start as soon as the athlete is in frame.
+            if mode == .hype {
+                stage = .active
+                startedAt = CACurrentMediaTime()
+                lastHypeCueAt = CACurrentMediaTime()
+                realtime.sendEvent(.setStarted(exercise: exercise, targetReps: nil),
+                                   requestSpeech: false)
+            }
         }
 
         guard let pose = pose else {
@@ -229,14 +252,17 @@ final class WorkoutController: NSObject, ObservableObject, CameraSessionDelegate
                                        requestSpeech: false)
                 }
                 collectedReps.append(rep)
-                let shouldSpeak = rep.index == targetReps || rep.issues.contains { $0.severity == .severe }
+                let shouldSpeak = mode == .hype
+                    ? rep.index % 5 == 0
+                    : rep.index == targetReps || rep.issues.contains { $0.severity == .severe }
                 realtime.sendEvent(.repCompleted(rep), requestSpeech: shouldSpeak)
-                if rep.index >= targetReps {
+                if mode == .form, rep.index >= targetReps {
                     handleTargetReached()
                 }
             case .formIssue(let issue, let exercise):
-                // Only react to form issues once a set is actually live.
-                guard stage == .active else { continue }
+                // Only react to form issues once a set is actually live — and
+                // never in hype mode, which promises zero form critique.
+                guard stage == .active, mode == .form else { continue }
                 realtime.sendEvent(.formIssue(exercise: exercise,
                                               issue: issue.id,
                                               severity: issue.severity),
@@ -428,6 +454,7 @@ struct WorkoutView: View {
         WorkoutSession(exercise: session.exercise,
                        targetReps: session.targetReps,
                        athleteName: session.athleteName,
+                       mode: session.mode,
                        shouldRecordSession: session.recordSession)
     }
 }
@@ -436,12 +463,16 @@ private struct WorkoutSession: View {
     @EnvironmentObject var session: SessionState
     @StateObject private var controller: WorkoutController
     @State private var permissionDenied = false
+    private let mode: CoachMode
 
-    init(exercise: ExerciseId, targetReps: Int, athleteName: String, shouldRecordSession: Bool) {
+    init(exercise: ExerciseId, targetReps: Int, athleteName: String,
+         mode: CoachMode, shouldRecordSession: Bool) {
+        self.mode = mode
         _controller = StateObject(wrappedValue: WorkoutController(
             exercise: exercise,
             targetReps: targetReps,
             athleteName: athleteName,
+            mode: mode,
             shouldRecordSession: shouldRecordSession))
     }
 
@@ -459,7 +490,7 @@ private struct WorkoutSession: View {
                 if case .failed(let message) = controller.sessionRecorder.state {
                     errorBanner("Recording: \(message)")
                 }
-                if !controller.snapshot.activeIssues.isEmpty {
+                if mode == .form, !controller.snapshot.activeIssues.isEmpty {
                     issueBanner
                 }
                 Spacer()
@@ -492,7 +523,8 @@ private struct WorkoutSession: View {
                     reps: controller.collectedRepsSnapshot,
                     durationMs: durationMs,
                     recordingURL: controller.recordingURL,
-                    recordingPhotoSaveState: controller.recordingPhotoSaveState)
+                    recordingPhotoSaveState: controller.recordingPhotoSaveState,
+                    mode: mode)
                 session.summary = summary
                 session.goSummary()
             }
@@ -519,8 +551,11 @@ private struct WorkoutSession: View {
     private var stageOverlay: some View {
         let isReady = controller.stage == .ready
         let title = isReady ? "Ready when you are" : "Looking for you…"
+        let readySubtitle = mode == .hype
+            ? "Get moving — your coach brings the energy from here."
+            : "Start your first \(session.exercise.displayName.lowercased()) — Spottr will count from there."
         let subtitle = isReady
-            ? "Start your first \(session.exercise.displayName.lowercased()) — Spottr will count from there."
+            ? readySubtitle
             : "Step fully into the frame so the camera can see your whole body."
         let icon = isReady ? "figure.strengthtraining.traditional" : "figure.stand"
 
@@ -549,9 +584,14 @@ private struct WorkoutSession: View {
     private var hud: some View {
         VStack(spacing: Spacing.sm) {
             HStack(spacing: Spacing.sm) {
-                stat("REPS", "\(controller.snapshot.reps)/\(session.targetReps)", accent: true)
-                stat("TIME", formatTime(ms: controller.elapsedMs))
-                stat("SCORE", controller.snapshot.lastScore.map { "\(Int($0 * 100))" } ?? "—")
+                if mode == .hype {
+                    // No rep target and no form scoring in a motivation session.
+                    stat("TIME", formatTime(ms: controller.elapsedMs), accent: true)
+                } else {
+                    stat("REPS", "\(controller.snapshot.reps)/\(session.targetReps)", accent: true)
+                    stat("TIME", formatTime(ms: controller.elapsedMs))
+                    stat("SCORE", controller.snapshot.lastScore.map { "\(Int($0 * 100))" } ?? "—")
+                }
             }
             cueBox
             if controller.sessionRecorder.state.isActive || controller.recordingURL != nil {
@@ -643,23 +683,8 @@ private struct WorkoutSession: View {
     private var bottomBar: some View {
         VStack(spacing: Spacing.sm) {
             HStack(spacing: Spacing.md) {
-                Button(action: { controller.manualRep() }) {
-                    Text("+ Rep")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
-                        .padding(.horizontal, Spacing.lg)
-                        .padding(.vertical, Spacing.sm + 4)
-                        .background(Theme.accent)
-                        .clipShape(Capsule())
-                }
-                Button(action: { controller.manualIssue() }) {
-                    Text("Issue")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(Color(red: 0.122, green: 0.075, blue: 0.0))
-                        .padding(.horizontal, Spacing.lg)
-                        .padding(.vertical, Spacing.sm + 4)
-                        .background(Theme.warn)
-                        .clipShape(Capsule())
+                if mode == .form {
+                    manualDemoButtons
                 }
                 Spacer(minLength: 0)
                 if CameraSession.hasCamera(at: .back) {
@@ -667,7 +692,7 @@ private struct WorkoutSession: View {
                 }
             }
             Button(action: finishNow) {
-                Text("End set")
+                Text(mode == .hype ? "End session" : "End set")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, Spacing.xl)
@@ -677,6 +702,31 @@ private struct WorkoutSession: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Demo-only controls for when the camera can't see the athlete. Form
+    /// sessions only — hype mode has no rep target or form issues to fake.
+    private var manualDemoButtons: some View {
+        HStack(spacing: Spacing.md) {
+            Button(action: { controller.manualRep() }) {
+                Text("+ Rep")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(Color(red: 0.004, green: 0.125, blue: 0.094))
+                    .padding(.horizontal, Spacing.lg)
+                    .padding(.vertical, Spacing.sm + 4)
+                    .background(Theme.accent)
+                    .clipShape(Capsule())
+            }
+            Button(action: { controller.manualIssue() }) {
+                Text("Issue")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(Color(red: 0.122, green: 0.075, blue: 0.0))
+                    .padding(.horizontal, Spacing.lg)
+                    .padding(.vertical, Spacing.sm + 4)
+                    .background(Theme.warn)
+                    .clipShape(Capsule())
+            }
+        }
     }
 
     /// Circular control that flips between the front and back camera.
