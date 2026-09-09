@@ -4,6 +4,7 @@
     "slug": "spottr",
     "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": false,
@@ -16,6 +17,10 @@
     },
     "android": {
       "package": "com.pithoslabs.spottr",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#151E3F"
+      },
       "permissions": ["CAMERA", "RECORD_AUDIO", "MODIFY_AUDIO_SETTINGS"]
     },
     "plugins": [
