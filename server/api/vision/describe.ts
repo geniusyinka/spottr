@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { z } from 'zod';
+import { requirePro } from '../../lib/pro';
 
 const DEFAULT_MODEL = process.env.OPENAI_VISION_MODEL ?? 'gpt-5.4';
 const MAX_IMAGE_BYTES = 2_500_000;
@@ -47,7 +48,7 @@ type VisionFacts = z.infer<typeof VisionFacts>;
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-RC-App-User-Id');
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'method not allowed' });
 
@@ -55,6 +56,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!apiKey) {
     return res.status(500).json({ error: 'OPENAI_API_KEY is not configured' });
   }
+
+  const pro = await requirePro(req);
+  if (!pro.ok) return res.status(pro.status).json({ error: pro.error });
 
   const parsed = DescribeRequest.safeParse(req.body ?? {});
   if (!parsed.success) {
