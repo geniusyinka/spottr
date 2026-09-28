@@ -39,7 +39,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: 'OPENAI_API_KEY and FISH_AUDIO_API_KEY must be configured' });
   }
 
-  const pro = await requirePro(req);
+  // Fails closed: this endpoint spends Fish credit, so it's never open.
+  const pro = await requirePro(req, { failClosed: true });
   if (!pro.ok) return res.status(pro.status).json({ error: pro.error });
 
   const parsed = LineRequest.safeParse(req.body ?? {});
